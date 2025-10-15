@@ -65,14 +65,14 @@ export default async function handler(req, res) {
 川柳のみを出力。`;
 
     const resp = await openai.chat.completions.create({
-      model: MODEL,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      temperature: 0.8,
-      max_tokens: 240,
-    });
+  model: MODEL,
+  messages: [
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ],
+  temperature: 0.8,
+  max_completion_tokens: 240,  // ← 新仕様
+});
 
     const text = resp.choices?.[0]?.message?.content?.trim() || "";
     return res.status(200).json({ result: text });
