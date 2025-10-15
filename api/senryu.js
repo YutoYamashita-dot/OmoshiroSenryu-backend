@@ -70,7 +70,6 @@ export default async function handler(req, res) {
     { role: "system", content: system },
     { role: "user", content: user },
   ],
-  temperature: 0.8,
   max_completion_tokens: 240,  // ← 新仕様
 });
 
