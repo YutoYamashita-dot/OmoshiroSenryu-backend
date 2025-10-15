@@ -1,7 +1,12 @@
 {
-  "name": "senryu-backend",
-  "version": "1.0.0",
+  "name": "omoshiro-senryu-backend",
   "private": true,
   "type": "module",
-  "dependencies": {}
+  "version": "1.0.0",
+  "dependencies": {
+    "openai": "^4.57.0"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  }
 }

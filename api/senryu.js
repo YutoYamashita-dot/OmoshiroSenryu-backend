@@ -1,61 +1,63 @@
 // api/senryu.js
+import OpenAI from "openai";
+
+// CORS対応（ブラウザから直接叩く可能性があるなら付ける）
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
 export default async function handler(req, res) {
+  setCors(res);
+  if (req.method === "OPTIONS") {
+    return res.status(200).end(); // CORS preflight
+  }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Use POST" });
+  }
+
   try {
-    // ✅ ① CORS（外部からアクセスできるようにする設定）
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (req.method === "OPTIONS") return res.status(200).end();
+    const { mode, theme, keywords, satireLevel = 1, ironyLevel = 1, count = 1 } = req.body || {};
 
-    // ✅ ② POST 以外は禁止
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Use POST" });
+    // 簡易バリデーション
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ error: "Server not configured (OPENAI_API_KEY missing)" });
+    }
+    if (!Array.isArray(keywords)) {
+      return res.status(400).json({ error: "keywords must be an array" });
     }
 
-    // ✅ ③ Androidアプリから送られてきたデータを受け取る
-    const { a, b } = req.body || {};
-    if (!a || !b) {
-      return res.status(400).json({ error: "Missing 'a' or 'b' in body" });
-    }
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // ✅ ④ OpenAI（ChatGPT）に「川柳を作って」とお願いする
-    const body = {
-      model: "gpt-4o-mini", // 小型で安くて高速なモデル
-      temperature: 0.9,      // 面白さ・創造性の強さ
+    const system = `あなたは川柳職人です。5-7-5を基本に、現代的な自由度も許容しつつ、
+- 「意外性と納得感」「緊張と緩和」「軽い風刺と皮肉」をバランス良く
+- 過度な攻撃性・名誉毀損・差別は避ける（個人名は配慮）
+- 音数の気持ちよさとオチを重視
+- 出力は${count}本。番号や説明は不要。`;
+    const user = `
+【モード】${mode === "current" ? "時事" : "普通"}
+【テーマ】${theme || "自由"}
+【キーワード】${keywords.join("、")}
+【皮肉度】${ironyLevel}/3
+【風刺度】${satireLevel}/3
+川柳のみを出力。`;
+
+    const resp = await openai.chat.completions.create({
+      model: "gpt-5",          // 使うモデル名に合わせて調整
       messages: [
-        {
-          role: "system",
-          content: "あなたは川柳職人。出力は必ず3行（5-7-5風）。A語とB語を必ず入れる。皮肉・意外性・緊張と緩和を活用。説明や余計な文字は出さない。"
-        },
-        {
-          role: "user",
-          content: `キーワードA:「${a}」, キーワードB:「${b}」。この2語を必ず含めて、1首だけ。`
-        }
-      ]
-    };
-
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.SenryuAPI}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ],
+      temperature: 0.8,
+      max_tokens: 240
     });
 
-    if (!r.ok) {
-      const text = await r.text();
-      return res.status(500).json({ error: "OpenAI error", detail: text });
-    }
+    const text = resp.choices?.[0]?.message?.content?.trim() || "";
+    return res.status(200).json({ result: text });
 
-    // ✅ ⑤ ChatGPTの返答（川柳）を受け取る
-    const json = await r.json();
-    const senryu = json?.choices?.[0]?.message?.content?.trim() ?? "";
-
-    // ✅ ⑥ Androidアプリに返す
-    return res.status(200).json({ senryu });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: "server error" });
+  } catch (err) {
+    console.error("server error:", err);
+    return res.status(500).json({ error: "Generation failed" });
   }
 }
