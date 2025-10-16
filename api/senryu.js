@@ -1,137 +1,123 @@
-// api/senryu.js
-import OpenAI from "openai";
+// pages/api/senryu.ts
+import type { NextApiRequest, NextApiResponse } from "next";
+import Parser from "rss-parser";
+import dayjs from "dayjs";
+import ja from "dayjs/locale/ja";
+dayjs.locale(ja);
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
+// 既存：LLM 呼び出し関数（あなたの環境のままでOK）
+async function callLLM(prompt: string): Promise<string> {
+  // OpenAI/Claude など既存実装を呼ぶ
+  // return await xxx(prompt)
+  throw new Error("callLLM 未実装。あなたの既存呼び出しに差し替えてください。");
 }
 
-// === OpenAI応答からテキストを堅牢に取り出すユーティリティ ===
-function extractTextFromChoice(choice) {
-  if (!choice) return "";
+type Body = {
+  mode?: "normal" | "current";
+  theme?: string;
+  keywords?: string[];
+  satireLevel?: number;
+  eleganceLevel?: number;
+  count?: number;
 
-  // ① 従来: string でくる
-  const msg = choice.message;
-  if (typeof msg?.content === "string") {
-    return msg.content.trim();
-  }
+  recencyDays?: number;
+  region?: string;
+  language?: string;
+  maxArticles?: number;
+  sources?: string[]; // ["googleNews"]
+  includeCitations?: boolean;
+};
 
-  // ② 一部SDK: contentが配列（{type:"text", text:"..."}）
-  if (Array.isArray(msg?.content)) {
-    const joined = msg.content
-      .map(p => (typeof p?.text === "string" ? p.text : ""))
-      .join("")
-      .trim();
-    if (joined) return joined;
-  }
-
-  // ③ 念のため choice.content 側の配列対応
-  if (Array.isArray(choice?.content)) {
-    const joined = choice.content
-      .map(p => (typeof p?.text === "string" ? p.text : ""))
-      .join("")
-      .trim();
-    if (joined) return joined;
-  }
-
-  return "";
-}
-
-export default async function handler(req, res) {
-  setCors(res);
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
-
-  // ---- ① ボディの安全パース ----
-  let body = req.body;
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    if (!body) {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const raw = Buffer.concat(chunks).toString("utf8");
-      body = raw ? JSON.parse(raw) : {};
-    } else if (typeof body === "string") {
-      body = JSON.parse(body);
+    const {
+      mode = "normal",
+      theme = "自由",
+      keywords = [],
+      satireLevel = 1,
+      eleganceLevel = 1,
+      count = 1,
+
+      recencyDays = 3,
+      region = "JP",
+      language = "ja",
+      maxArticles = 6,
+      sources = ["googleNews"],
+      includeCitations = true,
+    } = (typeof req.body === "string" ? JSON.parse(req.body) : req.body || {}) as Body;
+
+    // === 1) ニュース取り込み（時事モードのみ） =========================
+    let facts: { title: string; date: string; link: string }[] = [];
+
+    if (mode === "current") {
+      const parser = new Parser();
+      const q = encodeURIComponent([theme, ...keywords].filter(Boolean).join(" "));
+      const when = `when:${Math.max(1, recencyDays)}d`;
+      const feedUrl = `https://news.google.com/rss/search?q=${q}+${when}&hl=${language}&gl=${region}&ceid=${region}:${language}`;
+      const feed = await parser.parseURL(feedUrl);
+
+      facts = (feed.items || [])
+        .slice(0, maxArticles)
+        .map((it) => ({
+          title: it.title || "",
+          date: it.pubDate ? dayjs(it.pubDate).format("YYYY-MM-DD") : "",
+          link: it.link || (it.guid as string) || "",
+        }))
+        // タイトル重複を除去
+        .filter((v, i, a) => a.findIndex(x => x.title === v.title) === i);
     }
-  } catch {
-    return res.status(400).json({ error: "Invalid JSON body" });
-  }
 
-  const {
-    mode = "normal",
-    theme = "",
-    keywords = [],
-    satireLevel = 1,
-    ironyLevel = 1,
-    count = 1,
-  } = body || {};
+    // === 2) プロンプト構築 ===============================================
+    // 事実箇条書きを付け、川柳は季語不要・5-7-5 目安・辛口/風流度のガイドを与える
+    const today = dayjs().format("YYYY-MM-DD");
+    const bullets = facts.map((f, idx) => `- [${idx+1}] ${f.date} ${f.title}`).join("\n");
+    const citations = includeCitations
+      ? `出典:\n${facts.map((f, idx) => `[${idx+1}] ${f.link}`).join("\n")}`
+      : "";
 
-  // ---- ② 事前チェック ----
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({ error: "OPENAI_API_KEY is not set on server" });
-  }
-  if (!Array.isArray(keywords)) {
-    return res.status(400).json({ error: "keywords must be an array of strings" });
-  }
+    const styleHints =
+      mode === "current"
+        ? `時事性を最優先。婉曲表現より具体を。辛口=${satireLevel}, 風流=${eleganceLevel}`
+        : `辛口=${satireLevel}, 風流=${eleganceLevel}`;
 
-  // 軽い入力クレンジング
-  const safeCount = Math.max(1, Math.min(5, Number(count) || 1));
-  const safeKeywords = keywords.filter(x => typeof x === "string").slice(0, 8);
+    const prompt = `
+今日の日付: ${today}
+モード: ${mode}
+テーマ: ${theme}
+キーワード: ${keywords.join("、") || "（なし）"}
 
-  try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+${
+  mode === "current" && facts.length
+    ? `【最近の見出し（時事の根拠）】
+${bullets}
 
-    // ★ モデルは環境変数で上書き可。未設定なら無難なものに。
-    const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+${citations}`
+    : "（時事の根拠が不足しています。一般的な傾向から着想してください。）"
+}
 
-    const system = `あなたは川柳職人です。5-7-5を基本に、現代的な自由度も許容しつつ、
-- 「意外性と納得感」「緊張と緩和」「軽い風刺と皮肉」をバランス良く
-- 過度な攻撃性・名誉毀損・差別は避ける（個人名は配慮）
-- 音数の気持ちよさとオチを重視
-- 出力は${safeCount}本。番号や説明は不要。`;
+【タスク】
+- 日本語の川柳を1つ生成（必要なら季語なしでも可）
+- 5-7-5を“目安”に自然さを優先（厳密な字数にはこだわり過ぎない）
+- ${styleHints}
+- 最新見出しから着想し、固有名詞・出来事を1つは織り込む（過剰断定は避ける）
 
-    const user = `
-【モード】${mode === "current" ? "時事" : "普通"}
-【テーマ】${theme || "自由"}
-【キーワード】${safeKeywords.join("、")}
-【皮肉度】${ironyLevel}/3
-【風刺度】${satireLevel}/3
-川柳のみを出力。`;
+【出力形式】
+川柳のみ（前置きや説明は不要）
+    `.trim();
 
-    const resp = await openai.chat.completions.create({
-      model: MODEL,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      // 注意: 一部モデルは temperature 非対応。指定しない。
-      max_completion_tokens: 320, // 余裕を少し増やす
+    // === 3) 生成 ========================================================
+    const outputs: string[] = [];
+    for (let i = 0; i < Math.max(1, count); i++) {
+      const s = await callLLM(prompt);
+      outputs.push((s || "").trim());
+    }
+
+    // === 4) レスポンス ===================================================
+    res.status(200).json({
+      result: outputs.join("\n"),
+      usedFacts: includeCitations ? facts : undefined,
     });
-
-    // ★デバッグ：応答の全体像を確認（必要に応じてコメントアウト可）
-    console.log("openai raw:", JSON.stringify(resp, null, 2));
-
-    const choice = resp?.choices?.[0];
-    let text = extractTextFromChoice(choice);
-
-    // 返却テキストが空の時は finish_reason 等を返して原因特定しやすく
-    if (!text) {
-      const reason = choice?.finish_reason || "unknown";
-      return res.status(502).json({
-        error: `No content returned from model (finish_reason=${reason})`,
-      });
-    }
-
-    return res.status(200).json({ result: text });
-  } catch (err) {
-    const msg =
-      err?.response?.data?.error?.message ||
-      err?.error?.message ||
-      err?.message ||
-      "Generation failed";
-    console.error("OpenAI error:", msg);
-    return res.status(500).json({ error: msg });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || "server_error" });
   }
 }
